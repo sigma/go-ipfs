@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 
+	"github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/rakyll/magicmime"
 	core "github.com/ipfs/go-ipfs/core"
 	mdag "github.com/ipfs/go-ipfs/merkledag"
 	path "github.com/ipfs/go-ipfs/path"
@@ -24,6 +26,10 @@ import (
 )
 
 var log = logging.Logger("fuse/ipfs")
+
+func init() {
+	magicmime.Open(magicmime.MAGIC_NONE)
+}
 
 // FileSystem is the readonly IPFS Fuse Filesystem.
 type FileSystem struct {
@@ -94,6 +100,30 @@ func (s *Node) loadData() error {
 	return proto.Unmarshal(s.Nd.Data(), s.cached)
 }
 
+func (s *Node) isExecutable(ctx context.Context) bool {
+	r, err := uio.NewDagReader(ctx, s.Nd, s.Ipfs.DAG)
+	if err != nil {
+		return false
+	}
+	r.Seek(0, os.SEEK_SET)
+	buf := make([]byte, 512)
+	io.ReadFull(r, buf)
+
+	typ, err := magicmime.TypeByBuffer(buf)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(typ, "executable")
+}
+
+func (s *Node) getFileMode(ctx context.Context) os.FileMode {
+	if s.isExecutable(ctx) {
+		return 0555
+	} else {
+		return 0444
+	}
+}
+
 // Attr returns the attributes of a given node.
 func (s *Node) Attr(ctx context.Context, a *fuse.Attr) error {
 	log.Debug("Node attr")
@@ -109,13 +139,13 @@ func (s *Node) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Gid = uint32(os.Getgid())
 	case ftpb.Data_File:
 		size := s.cached.GetFilesize()
-		a.Mode = 0444
+		a.Mode = s.getFileMode(ctx)
 		a.Size = uint64(size)
 		a.Blocks = uint64(len(s.Nd.Links()))
 		a.Uid = uint32(os.Getuid())
 		a.Gid = uint32(os.Getgid())
 	case ftpb.Data_Raw:
-		a.Mode = 0444
+		a.Mode = s.getFileMode(ctx)
 		a.Size = uint64(len(s.cached.GetData()))
 		a.Blocks = uint64(len(s.Nd.Links()))
 		a.Uid = uint32(os.Getuid())
